@@ -1,113 +1,105 @@
+# CVE & Container Security API (Postgres + FastAPI + GraphQL + MCP)
 
-# CVE GraphQL API (Postgres + FastAPI + Strawberry)
+This project provides a minimal security analytics backend with:
 
-This project is a minimal GraphQL API for querying CVE data stored in PostgreSQL.  
-It uses FastAPI, Strawberry GraphQL, SQLAlchemy, and psycopg2.
+- A PostgreSQL schema for CVEs and container assets.
+- Seed scripts for realistic sample data.
+- Both GraphQL and REST APIs (FastAPI + Strawberry + SQLAlchemy).
+- MCP servers for GraphQL and REST, so tools/agents (e.g. Claude, Next.js demo) can query it.
 
-## Features
+---
 
-- PostgreSQL schema `security` with a `cves` table for CVE records.
-- Seed script to load sample CVEs.
-- GraphQL API with:
-  - `cves(severity, limit)` to list CVEs.
-  - `cve(id)` to fetch a single CVE.
-- Computed `references` field derived from `raw_data` JSON.
-
-## Requirements
+## 1. Requirements
 
 - Python 3.11+
 - PostgreSQL (tested with 14+)
-- pip / venv
+- Podman or Docker
+- `pip` / `venv`
 
-## Setup
+---
 
-## 0. Use Podman to run postgres
-```
+## 2. PostgreSQL via Podman
 
+Create a volume and run Postgres:
+
+```bash
 podman volume create pg-data
 
 podman run -d --name my-postgres -p 5432:5432 \
   -e POSTGRES_PASSWORD=vulns \
-  -v /Users/aselvamani/code/pg-data:/var/lib/postgresql/data:Z \
+  -v yourfolder/pg-data:/var/lib/postgresql/data:Z \
   docker.io/library/postgres:16
 
-podman exec -it my-postgres psql -U postgres 
-
-
+podman exec -it my-postgres psql -U postgres
 ```
 
-### 1. Create and activate a virtual environment
+Inside `psql`, create the `security` schema:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS security;
+```
+
+Run the SQL files in the `sql` folder to create tables.
+
+---
+
+## 3. Python Environment & Dependencies
+
+Create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\\Scripts\\activate
+source .venv/bin/activate    # On Windows: .venv\Scripts\activate
 ```
 
-### 2. Install dependencies
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure the database
+---
 
-Create the `security` schema and tables in Postgres:
+## 4. Database Configuration & Seed Data
 
-```sql
-CREATE SCHEMA IF NOT EXISTS security;
-
-CREATE TABLE IF NOT EXISTS security.cves (
-    cve_id       TEXT PRIMARY KEY,
-    summary      TEXT NOT NULL,
-    severity     TEXT NOT NULL,
-    cvss_score   NUMERIC(3,1),
-    published_at TIMESTAMPTZ,
-    updated_at   TIMESTAMPTZ,
-    description  TEXT,
-    raw_data     JSONB,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    modified_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
-
-Update `DATABASE_URL` in `schema.py` if needed:
+Set the database URL in `schema.py` (adjust if needed):
 
 ```python
 DATABASE_URL = "postgresql+psycopg2://postgres:vulns@localhost:5432/postgres"
 ```
 
-### 4. Seed sample data
-
-Run the seed script to insert sample CVEs into `security.cves`:
+Seed the CVE and container data:
 
 ```bash
-python seed_cves.py
+python seed_data_cve.py
+python seed_container_assets.py
+python seed_asset_tags_remediation.py
 ```
 
-Verify in psql:
+Verify in `psql`:
 
 ```sql
 SELECT * FROM security.cves LIMIT 5;
 ```
 
-### 5. Run the server
+---
 
-Use Uvicorn to start the FastAPI app:
+## 5. GraphQL API
+
+Start the GraphQL server:
 
 ```bash
-uvicorn main:app --reload
+python graph.py
 ```
 
-The API will be available at:
+Endpoints:
 
-- GraphQL endpoint: `http://127.0.0.1:8000/graphql`
-- Health check: `http://127.0.0.1:8000/health`
+- GraphQL: `http://127.0.0.1:8000/graphql`
+- Health: `http://127.0.0.1:8000/health`
 
-## GraphQL usage
+### Example GraphQL Queries
 
-Open the GraphQL IDE at `/graphql` or use `curl`.
-
-### List CVEs
+List CVEs:
 
 ```graphql
 query {
@@ -122,7 +114,7 @@ query {
 }
 ```
 
-### Get a single CVE
+Get a single CVE:
 
 ```graphql
 query {
@@ -136,9 +128,9 @@ query {
 }
 ```
 
-containers
+List container assets with CVEs:
 
-```container
+```graphql
 query {
   containerAssets(publiclyExposed: true, runsAsRoot: true) {
     id
@@ -155,8 +147,9 @@ query {
 }
 ```
 
+Get one container asset:
 
-```container
+```graphql
 query {
   containerAsset(id: 1) {
     name
@@ -171,22 +164,51 @@ query {
 }
 ```
 
-`references` is derived from the `raw_data` JSON column (e.g., `raw_data.references`).
+> Note: `references` is derived from the `raw_data` JSON column on `security.cves`.
 
-## Project structure
+---
+
+## 6. REST API
+
+Start the REST server:
+
+```bash
+python rest.py
+```
+
+Endpoint:
+
+- Swagger UI: `http://127.0.0.1:8001/docs`
+
+The REST API exposes similar functionality for listing CVEs and container assets via HTTP endpoints.
+
+---
+
+## 7. Project Structure (Core Backend)
 
 ```text
 .
-├── main.py        # FastAPI + Strawberry GraphQL entrypoint
-├── models.py      # SQLAlchemy models (CVE)
-├── schema.py      # Strawberry GraphQL schema & resolvers
-├── seed_cves.py   # Seed script to insert sample CVEs
+├── graph.py                 # GraphQL server (FastAPI + Strawberry)
+├── rest.py                  # REST API server (FastAPI)
+├── mcp_graph_server.py      # MCP server wrapping the GraphQL API
+├── mcp_rest_server.py       # MCP server wrapping the REST API
+├── models.py                # SQLAlchemy models (CVE, container assets, etc.)
+├── schema.py                # GraphQL schema & resolvers
+├── seed_data_cve.py         # Seed script: CVEs
+├── seed_container_assets.py # Seed script: container assets
+├── seed_asset_tags_remediation.py # Seed script: tags & remediation
+├── sql/                     # DDL for security schema & tables
 ├── requirements.txt
 └── README.md
 ```
 
-## Graph QL Mcp
-```
+---
+
+## 8. GraphQL MCP Setup
+
+Install GraphQL MCP tooling:
+
+```bash
 brew install graphql-cli
 
 pip3 install graphql-mcp
@@ -194,41 +216,102 @@ pip3 install mcp-graphql
 
 pip3 show graphql-mcp
 pip3 show mcp-graphql
-
-
-graphql-mcp-server
-
-export GRAPHQL_API_ENDPOINT="http://127.0.0.1:8000/graphql"
-
 ```
 
-# If you add auth later, you can expose an API key or token here as well
+Run the generic GraphQL MCP server:
+
+```bash
+export GRAPHQL_API_ENDPOINT="http://127.0.0.1:8000/graphql"
+# Optional:
 # export GRAPHQL_API_KEY="..."
-# Whitelist operations if you want to restrict tools:
 # export WHITELISTED_QUERIES='["cves","cve","containerAssets","containerAsset"]'
 
-## fastmcp
-
+graphql-mcp-server
 ```
-python3 -m venv .mcp-venv
-source .mcp-venv/bin/activate
 
+---
+
+## 9. fastmcp
+
+Install `fastmcp` for the Python MCP servers:
+
+```bash
 pip install fastmcp httpx
 ```
-## final from claude
 
-```
+This is used by `mcp_graph_server.py` and `mcp_rest_server.py` to expose dedicated MCP tools over stdio or HTTP.
 
-{
-  "mcpServers": {
-    "cve-graphql": {
-      "command": "python",
-      "args": ["mcp_server.py"],
-      "env": {
-        "GRAPHQL_API_ENDPOINT": "http://127.0.0.1:8000/graphql"
-      }
-    }
+---
+
+## 10. Claude MCP Configuration
+
+Example Claude MCP config for Graph:
+
+```json
+"mcpServers": {
+  "graph-mcp": {
+    "command": "npx",
+    "args": ["-y", "mcp", "http://127.0.0.1:8000/mcp"]
   }
 }
-
 ```
+
+For REST:
+
+```json
+"mcpServers": {
+  "rest-mcp": {
+    "command": "npx",
+    "args": ["-y", "mcp", "http://127.0.0.1:8001/mcp"]
+  }
+}
+```
+
+Monitor MCP server logs (macOS default):
+
+```bash
+tail -f ~/Library/Logs/Claude/mcp-server-graph-mcp.log
+# or
+tail -f ~/Library/Logs/Claude/mcp-server-rest-mcp.log
+```
+
+---
+
+## 11. Dedicated MCP Servers (Graph & REST)
+
+Instead of the generic GraphQL MCP, you can run first-class MCP servers that expose domain-specific tools:
+
+Graph integration:
+
+```bash
+python mcp_graph_server.py
+```
+
+REST integration:
+
+```bash
+python mcp_rest_server.py
+```
+
+These wrap the GraphQL and REST APIs respectively and provide tools like `getcontainerassets`, `getcves`, `listcontainerassets`, and `listcves`.
+
+---
+
+## 12. Example Complex Questions
+
+Good “agent” questions to drive multi-step or aggregated behavior:
+
+- “Show the top 5 publicly exposed assets that have at least one critical CVE, and include only the asset name, namespace, CVE id, severity, and score.”  
+- “Find assets that are public or run as root and list only the CVEs that have CVSS score greater than 8.”
+
+---
+
+## 13. MCP Inspector
+
+You can introspect and test MCP servers with the inspector:
+
+```bash
+npx @modelcontextprotocol/inspector@latest
+```
+
+Point it at your MCP servers (Graph or REST) to explore available tools and responses interactively.

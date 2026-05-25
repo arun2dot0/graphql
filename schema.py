@@ -1,17 +1,62 @@
-import strawberry
-from strawberry.scalars import JSON
-from typing import List, Optional
+import sys
+import json
+import logging
 from datetime import datetime
+from typing import List, Optional
+
+import strawberry
+from strawberry.extensions import SchemaExtension
+from strawberry.scalars import JSON
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from models import CVE, ContainerAsset
+from models import CVE, ContainerAsset, AssetTag, Remediation, container_asset_tags
+
+logger = logging.getLogger("mcp")
 
 DATABASE_URL = "postgresql+psycopg2://postgres:vulns@localhost:5432/postgres"
-
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(bind=engine)
+
+
+class ClaudeQueryLogger(SchemaExtension):
+    """Custom Strawberry extension to capture exactly what Claude executes."""
+
+    def on_execute(self):
+        execution_context = self.execution_context
+        log_msg = (
+            f"\n📥 [RAW GRAPHQL RECEIVED FROM CLAUDE]\n"
+            f"{execution_context.query.strip()}\n"
+        )
+        if execution_context.variables:
+            log_msg += f"Variables: {json.dumps(execution_context.variables, indent=2)}\n"
+        logger.info(log_msg)
+        yield
+
+
+@strawberry.type
+class AssetTagType:
+    id: int
+    name: str
+    category: str
+    description: Optional[str]
+    created_at: Optional[datetime]
+
+
+@strawberry.type
+class RemediationType:
+    id: int
+    cve_id: str
+    title: str
+    priority: str
+    summary: Optional[str]
+    fix_steps: JSON
+    vendor_references: JSON
+    estimated_effort: Optional[str]
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
+
 
 @strawberry.type
 class CVEType:
@@ -28,6 +73,53 @@ class CVEType:
     def references(self) -> JSON:
         return (self.raw_data or {}).get("references", [])
 
+    @strawberry.field
+    def remediation(self) -> Optional[RemediationType]:
+        with SessionLocal() as session:
+            row = session.execute(
+                select(Remediation).where(Remediation.cve_id == self.id)
+            ).scalars().first()
+
+            if not row:
+                return None
+
+            return RemediationType(
+                id=row.id,
+                cve_id=row.cve_id,
+                title=row.title,
+                priority=row.priority,
+                summary=row.summary,
+                fix_steps=row.fix_steps,
+                vendor_references=row.vendor_references,
+                estimated_effort=row.estimated_effort,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+
+
+def get_tags_for_asset(session, asset_id: int) -> List[AssetTagType]:
+    rows = (
+        session.execute(
+            select(AssetTag)
+            .join(container_asset_tags, container_asset_tags.c.tag_id == AssetTag.id)
+            .where(container_asset_tags.c.container_id == asset_id)
+        )
+        .scalars()
+        .all()
+    )
+
+    return [
+        AssetTagType(
+            id=row.id,
+            name=row.name,
+            category=row.category,
+            description=row.description,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
 @strawberry.type
 class ContainerAssetType:
     id: int
@@ -42,6 +134,8 @@ class ContainerAssetType:
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
     cves: List[CVEType]
+    tags: List[AssetTagType]
+
 
 @strawberry.type
 class Query:
@@ -55,6 +149,7 @@ class Query:
     ) -> List[CVEType]:
         with SessionLocal() as session:
             stmt = select(CVE)
+
             if severity:
                 stmt = stmt.where(CVE.severity == severity)
             if published_after:
@@ -95,7 +190,7 @@ class Query:
                 description=row.description,
                 raw_data=row.raw_data,
             )
-            
+
     @strawberry.field
     def container_assets(
         self,
@@ -105,6 +200,7 @@ class Query:
     ) -> List[ContainerAssetType]:
         with SessionLocal() as session:
             stmt = select(ContainerAsset)
+
             if publicly_exposed is not None:
                 stmt = stmt.where(ContainerAsset.publicly_exposed == publicly_exposed)
             if runs_as_root is not None:
@@ -131,9 +227,7 @@ class Query:
                             id=cve.id,
                             summary=cve.summary,
                             severity=cve.severity,
-                            cvss_score=float(cve.cvss_score)
-                            if cve.cvss_score is not None
-                            else None,
+                            cvss_score=float(cve.cvss_score) if cve.cvss_score is not None else None,
                             published_at=cve.published_at,
                             updated_at=cve.updated_at,
                             description=cve.description,
@@ -141,6 +235,7 @@ class Query:
                         )
                         for cve in row.cves
                     ],
+                    tags=get_tags_for_asset(session, row.id),
                 )
                 for row in rows
             ]
@@ -169,9 +264,7 @@ class Query:
                         id=cve.id,
                         summary=cve.summary,
                         severity=cve.severity,
-                        cvss_score=float(cve.cvss_score)
-                        if cve.cvss_score is not None
-                        else None,
+                        cvss_score=float(cve.cvss_score) if cve.cvss_score is not None else None,
                         published_at=cve.published_at,
                         updated_at=cve.updated_at,
                         description=cve.description,
@@ -179,6 +272,47 @@ class Query:
                     )
                     for cve in row.cves
                 ],
-            )        
+                tags=get_tags_for_asset(session, row.id),
+            )
 
-schema = strawberry.Schema(query=Query)
+    @strawberry.field
+    def asset_tags(self, limit: int = 100) -> List[AssetTagType]:
+        with SessionLocal() as session:
+            rows = session.execute(select(AssetTag).limit(limit)).scalars().all()
+            return [
+                AssetTagType(
+                    id=row.id,
+                    name=row.name,
+                    category=row.category,
+                    description=row.description,
+                    created_at=row.created_at,
+                )
+                for row in rows
+            ]
+
+    @strawberry.field
+    def remediations(self, priority: Optional[str] = None, limit: int = 100) -> List[RemediationType]:
+        with SessionLocal() as session:
+            stmt = select(Remediation)
+            if priority:
+                stmt = stmt.where(Remediation.priority == priority)
+
+            rows = session.execute(stmt.limit(limit)).scalars().all()
+            return [
+                RemediationType(
+                    id=row.id,
+                    cve_id=row.cve_id,
+                    title=row.title,
+                    priority=row.priority,
+                    summary=row.summary,
+                    fix_steps=row.fix_steps,
+                    vendor_references=row.vendor_references,
+                    estimated_effort=row.estimated_effort,
+                    created_at=row.created_at,
+                    updated_at=row.updated_at,
+                )
+                for row in rows
+            ]
+
+
+schema = strawberry.Schema(query=Query, extensions=[ClaudeQueryLogger])

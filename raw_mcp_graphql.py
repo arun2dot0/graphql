@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import json
 import sys
-import uuid
 from typing import Any, Dict, Optional
 import http.client
 from urllib.parse import urlparse
@@ -33,6 +32,16 @@ def send_response(id: Any, result: Any = None, error: Any = None):
     sys.stdout.write(json.dumps(response) + "\n")
     sys.stdout.flush()
 
+def tool_result(text: str):
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": text,
+            }
+        ]
+    }
+
 def main():
     for line in sys.stdin:
         line = line.strip()
@@ -46,14 +55,12 @@ def main():
         method = req.get("method")
         req_id = req.get("id")
 
-        # Basic MCP-like JSON-RPC handling
         if method == "initialize":
-            # Minimal capabilities and tool metadata
             result = {
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "cve-graphql-mcp",
-                    "version": "0.1.0",
+                    "version": "0.2.0",
                 },
                 "capabilities": {
                     "tools": {}
@@ -62,24 +69,23 @@ def main():
             send_response(req_id, result=result)
 
         elif method == "tools/list":
-            # Define tools and their JSON-schema-ish params
             tools = [
                 {
                     "name": "cves",
-                    "description": "List CVEs with optional filters",
+                    "description": "List CVEs with optional severity and publication date filters.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "severity": {"type": "string"},
                             "limit": {"type": "integer", "default": 20},
-                            "created_after": {"type": "string"},
-                            "created_before": {"type": "string"},
+                            "published_after": {"type": "string"},
+                            "published_before": {"type": "string"},
                         },
                     },
                 },
                 {
                     "name": "cve",
-                    "description": "Get a single CVE by id",
+                    "description": "Get a single CVE by id.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -90,7 +96,7 @@ def main():
                 },
                 {
                     "name": "containerAssets",
-                    "description": "List container assets with optional filters",
+                    "description": "List container assets with optional filters.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -102,13 +108,34 @@ def main():
                 },
                 {
                     "name": "containerAsset",
-                    "description": "Get one container asset by id",
+                    "description": "Get one container asset by id.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "id": {"type": "integer"},
                         },
                         "required": ["id"],
+                    },
+                },
+                {
+                    "name": "assetTags",
+                    "description": "List asset tags such as prod, staging, public, internal, critical, or business tags.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "default": 100},
+                        },
+                    },
+                },
+                {
+                    "name": "remediations",
+                    "description": "List remediation guidance for CVEs, optionally filtered by priority.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "priority": {"type": "string"},
+                            "limit": {"type": "integer", "default": 100},
+                        },
                     },
                 },
             ]
@@ -122,23 +149,24 @@ def main():
                 if tool_name == "cves":
                     q = """
                     query Cves($severity: String, $limit: Int!, $createdAfter: DateTime, $createdBefore: DateTime) {
-                      cves(severity: $severity, limit: $limit, createdAfter: $createdAfter, createdBefore: $createdBefore) {
+                      cves(severity: $severity, limit: $limit, publishedAfter: $createdAfter, publishedBefore: $createdBefore) {
                         id
                         summary
                         severity
                         cvssScore
                         publishedAt
+                        updatedAt
                       }
                     }
                     """
                     vars = {
                         "severity": arguments.get("severity"),
                         "limit": arguments.get("limit", 20),
-                        "createdAfter": arguments.get("created_after"),
-                        "createdBefore": arguments.get("created_before"),
+                        "createdAfter": arguments.get("published_after"),
+                        "createdBefore": arguments.get("published_before"),
                     }
                     data = call_graphql(q, vars)
-                    send_response(req_id, result={"content": data})
+                    send_response(req_id, result=tool_result(json.dumps(data, default=str)))
 
                 elif tool_name == "cve":
                     q = """
@@ -149,13 +177,24 @@ def main():
                         severity
                         cvssScore
                         publishedAt
+                        updatedAt
                         references
+                        remediation {
+                          id
+                          cveId
+                          title
+                          priority
+                          summary
+                          fixSteps
+                          vendorReferences
+                          estimatedEffort
+                        }
                       }
                     }
                     """
                     vars = {"id": arguments["id"]}
                     data = call_graphql(q, vars)
-                    send_response(req_id, result={"content": data})
+                    send_response(req_id, result=tool_result(json.dumps(data, default=str)))
 
                 elif tool_name == "containerAssets":
                     q = """
@@ -164,12 +203,31 @@ def main():
                         id
                         name
                         image
+                        registry
+                        environment
+                        namespace
+                        serviceName
                         publiclyExposed
                         runsAsRoot
+                        createdAt
+                        updatedAt
+                        tags {
+                          id
+                          name
+                          category
+                          description
+                        }
                         cves {
                           id
                           severity
                           cvssScore
+                          remediation {
+                            id
+                            cveId
+                            title
+                            priority
+                            summary
+                          }
                         }
                       }
                     }
@@ -180,7 +238,7 @@ def main():
                         "limit": arguments.get("limit", 20),
                     }
                     data = call_graphql(q, vars)
-                    send_response(req_id, result={"content": data})
+                    send_response(req_id, result=tool_result(json.dumps(data, default=str)))
 
                 elif tool_name == "containerAsset":
                     q = """
@@ -189,19 +247,78 @@ def main():
                         id
                         name
                         image
+                        registry
+                        environment
+                        namespace
+                        serviceName
                         publiclyExposed
                         runsAsRoot
+                        createdAt
+                        updatedAt
+                        tags {
+                          id
+                          name
+                          category
+                          description
+                        }
                         cves {
                           id
                           severity
                           cvssScore
+                          remediation {
+                            id
+                            cveId
+                            title
+                            priority
+                            summary
+                          }
                         }
                       }
                     }
                     """
                     vars = {"id": arguments["id"]}
                     data = call_graphql(q, vars)
-                    send_response(req_id, result={"content": data})
+                    send_response(req_id, result=tool_result(json.dumps(data, default=str)))
+
+                elif tool_name == "assetTags":
+                    q = """
+                    query AssetTags($limit: Int!) {
+                      assetTags(limit: $limit) {
+                        id
+                        name
+                        category
+                        description
+                        createdAt
+                      }
+                    }
+                    """
+                    vars = {"limit": arguments.get("limit", 100)}
+                    data = call_graphql(q, vars)
+                    send_response(req_id, result=tool_result(json.dumps(data, default=str)))
+
+                elif tool_name == "remediations":
+                    q = """
+                    query Remediations($priority: String, $limit: Int!) {
+                      remediations(priority: $priority, limit: $limit) {
+                        id
+                        cveId
+                        title
+                        priority
+                        summary
+                        fixSteps
+                        vendorReferences
+                        estimatedEffort
+                        createdAt
+                        updatedAt
+                      }
+                    }
+                    """
+                    vars = {
+                        "priority": arguments.get("priority"),
+                        "limit": arguments.get("limit", 100),
+                    }
+                    data = call_graphql(q, vars)
+                    send_response(req_id, result=tool_result(json.dumps(data, default=str)))
 
                 else:
                     send_response(
@@ -218,7 +335,6 @@ def main():
                 )
 
         else:
-            # Unknown method
             send_response(
                 req_id,
                 error={"code": -32601, "message": f"Unknown method {method}"},
