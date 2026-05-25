@@ -26,7 +26,7 @@ class ClaudeQueryLogger(SchemaExtension):
     def on_execute(self):
         execution_context = self.execution_context
         log_msg = (
-            f"\n📥 [RAW GRAPHQL RECEIVED FROM CLAUDE]\n"
+            f"\n📥 [RAW GRAPHQL RECEIVED FROM LLM]\n"
             f"{execution_context.query.strip()}\n"
         )
         if execution_context.variables:
@@ -196,6 +196,7 @@ class Query:
         self,
         publicly_exposed: Optional[bool] = None,
         runs_as_root: Optional[bool] = None,
+        tags: Optional[List[str]] = None,   # ← add argument here
         limit: int = 20,
     ) -> List[ContainerAssetType]:
         with SessionLocal() as session:
@@ -205,6 +206,21 @@ class Query:
                 stmt = stmt.where(ContainerAsset.publicly_exposed == publicly_exposed)
             if runs_as_root is not None:
                 stmt = stmt.where(ContainerAsset.runs_as_root == runs_as_root)
+
+            # Filter by tag names if provided
+            if tags:
+                stmt = (
+                    stmt.join(
+                        container_asset_tags,
+                        ContainerAsset.id == container_asset_tags.c.container_id,
+                    )
+                    .join(
+                        AssetTag,
+                        container_asset_tags.c.tag_id == AssetTag.id,
+                    )
+                    .where(AssetTag.name.in_(tags))
+                    .distinct()
+                )
 
             result = session.execute(stmt.limit(limit))
             rows = result.unique().scalars().all()
@@ -227,7 +243,9 @@ class Query:
                             id=cve.id,
                             summary=cve.summary,
                             severity=cve.severity,
-                            cvss_score=float(cve.cvss_score) if cve.cvss_score is not None else None,
+                            cvss_score=float(cve.cvss_score)
+                            if cve.cvss_score is not None
+                            else None,
                             published_at=cve.published_at,
                             updated_at=cve.updated_at,
                             description=cve.description,
