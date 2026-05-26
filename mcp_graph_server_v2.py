@@ -201,6 +201,12 @@ def build_filters_arguments(filters: Dict[str, Any]) -> (str, Dict[str, Any]):
     arg_str = ", ".join(arg_lines)
     return arg_str, variables
 
+from typing import Any, Dict, List, Optional, Union
+import sys
+import json
+
+
+
 
 @mcp.tool()
 def query_security_graph(

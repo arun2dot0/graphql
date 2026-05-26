@@ -62,6 +62,8 @@ pip install -r requirements.txt
 
 ## 4. Database Configuration & Seed Data
 
+Run the sql scripts in sql folder 
+
 Set the database URL in `schema.py` (adjust if needed):
 
 ```python
@@ -245,26 +247,46 @@ This is used by `mcp_graph_server.py` and `mcp_rest_server.py` to expose dedicat
 
 ## 10. Claude MCP Configuration
 
+Run the mcp_rest_server.py , mcp_graph_server_v2.py 
+```
+  run in stdio for claude integration
+  mcp.run(transport="stdio")
+```
+
+
 Example Claude MCP config for Graph:
 
 ```json
 "mcpServers": {
-  "graph-mcp": {
-    "command": "npx",
-    "args": ["-y", "mcp", "http://127.0.0.1:8000/mcp"]
+    "graph-mcp": {
+      "command": "python",
+      "args": ["/projectfolder/mcp_graph_server_v2.py"]
+    }
   }
-}
 ```
 
 For REST:
 
 ```json
 "mcpServers": {
-  "rest-mcp": {
-    "command": "npx",
-    "args": ["-y", "mcp", "http://127.0.0.1:8001/mcp"]
+    "graph-mcp": {
+      "command": "python",
+      "args": ["/projectfolder/mcp_rest_server.py"]
+    }
   }
-}
+```
+
+
+Prompt claude to not use cache
+```
+Every time I ask about security data (containers, CVEs, tags, etc.), you MUST:
+1. Call the MCP tool `query_security_graph` (or the relevant tool)
+2. Do NOT reuse any previous tool result from earlier in this chat
+3. Treat each request as if no prior data exists
+4. This query requires multiple steps. For each distinct entity or filter, call query_security_graph separately.
+
+
+If you are unsure whether to call the tool, always call it.
 ```
 
 Monitor MCP server logs (macOS default):
@@ -297,12 +319,20 @@ These wrap the GraphQL and REST APIs respectively and provide tools like `getcon
 
 ---
 
-## 12. Example Complex Questions
+## 12. Example Promptions
 
+- Complex 
 Good “agent” questions to drive multi-step or aggregated behavior:
 
 - “Show the top 5 publicly exposed assets that have at least one critical CVE, and include only the asset name, namespace, CVE id, severity, and score.”  
 - “Find assets that are public or run as root and list only the CVEs that have CVSS score greater than 8.”
+- "List all public container assets in prod with CVEs and severity."
+- "Show containers running as root and are public"
+- "Give me recent CRITICAL CVEs affecting my containers."
+- "Generate a prioritized remediation plan for production assets, grouped by severity and estimated effort.show affected assets"
+- "find name and environment for container assets with tag auth"
+
+- get me cve and remediation details for CVE-2025-10007
 
 ---
 
