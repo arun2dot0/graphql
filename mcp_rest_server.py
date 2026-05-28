@@ -269,5 +269,5 @@ def list_remediations(priority: Optional[str] = None, limit: int = 100):
         db.close()
 
 if __name__ == "__main__":
-    # mcp.run(transport="streamable-http", mount_path="/mcp")
-    mcp.run(transport="stdio")
+    mcp.run(transport="streamable-http", mount_path="/mcp")
+    # mcp.run(transport="stdio")

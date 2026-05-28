@@ -37,17 +37,14 @@ def execute_gql_with_logging(gql_query: str, variables: dict):
 
 # ===== Tool 1: schema introspection =====
 
+
 @mcp.tool()
 def get_security_schema() -> dict:
     """
     Return a compact JSON description of the security graph schema, including
-    entities, fields, and relationships.
-
-    Use this tool whenever you need to understand which entities and fields
-    exist before forming a query for containers, services, namespaces, images,
-    environments, tags, or CVEs.
+    entities, fields, relationships, and filter capabilities.
     """
-    print("call get_security_schema")
+    print("call get_security_schema", file=sys.stderr)
     return {
         "entities": {
             "ContainerAsset": {
@@ -68,6 +65,34 @@ def get_security_schema() -> dict:
                     "tags": "Tag[]",
                     "cves": "CVE[]",
                 },
+                "filters": {
+                    # exact match
+                    "environment": {
+                        "type": "string",
+                        "operators": ["eq", "in"],
+                        "allowedValues": ["dev", "staging", "prod"],
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "operators": ["eq", "in"],
+                    },
+                    "serviceName": {
+                        "type": "string",
+                        "operators": ["eq", "contains"],
+                    },
+                    "publiclyExposed": {
+                        "type": "boolean",
+                        "operators": ["eq"],
+                    },
+                    "runsAsRoot": {
+                        "type": "boolean",
+                        "operators": ["eq"],
+                    },
+                    "createdAt": {
+                        "type": "datetime",
+                        "operators": ["before", "after", "between"],
+                    },
+                },
             },
             "Service": {
                 "fields": {
@@ -79,6 +104,17 @@ def get_security_schema() -> dict:
                 "relations": {
                     "containers": "ContainerAsset[]",
                 },
+                "filters": {
+                    "environment": {
+                        "type": "string",
+                        "operators": ["eq", "in"],
+                        "allowedValues": ["dev", "staging", "prod"],
+                    },
+                    "name": {
+                        "type": "string",
+                        "operators": ["eq", "contains"],
+                    },
+                },
             },
             "Tag": {
                 "fields": {
@@ -86,7 +122,18 @@ def get_security_schema() -> dict:
                     "name": "string",
                     "category": "string",
                     "description": "string",
-                }
+                },
+                "filters": {
+                    "name": {
+                        "type": "string",
+                        "operators": ["eq", "in"],
+                    },
+                    "category": {
+                        "type": "string",
+                        "operators": ["eq", "in"],
+                        "allowedValues": ["compliance", "auth", "network"],
+                    },
+                },
             },
             "CVE": {
                 "fields": {
@@ -101,6 +148,21 @@ def get_security_schema() -> dict:
                 "relations": {
                     "remediation": "Remediation[]",
                 },
+                "filters": {
+                    "severity": {
+                        "type": "string",
+                        "operators": ["eq", "in"],
+                        "allowedValues": ["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+                    },
+                    "cvssScore": {
+                        "type": "number",
+                        "operators": ["gt", "gte", "lt", "lte", "between"],
+                    },
+                    "publishedAt": {
+                        "type": "datetime",
+                        "operators": ["before", "after", "between"],
+                    },
+                },
             },
             "Remediation": {
                 "fields": {
@@ -110,7 +172,14 @@ def get_security_schema() -> dict:
                     "priority": "string",
                     "summary": "string",
                     "estimatedEffort": "string",
-                }
+                },
+                "filters": {
+                    "priority": {
+                        "type": "string",
+                        "operators": ["eq", "in"],
+                        "allowedValues": ["LOW", "MEDIUM", "HIGH"],
+                    },
+                },
             },
         }
     }
@@ -129,15 +198,17 @@ ENTITY_TO_ROOT_FIELD = {
 
 
 def build_selection_for_entity(entity: str, fields: Optional[List[str]]) -> str:
-    """
-    Build a GraphQL selection set for the given entity and list of field paths.
+    # """
+    # Build a GraphQL selection set for the given entity and list of field paths.
 
-    Supports nested paths like:
-      - "name", "environment"
-      - "tags.name"
-      - "cves.summary"
-      - "cves.remediation.title"
-    """
+    # Supports nested paths like:
+    #   - "name", "environment"
+    #   - "tags.name"
+    #   - "cves.summary"
+    #   - "cves.remediation.title"
+    # """
+
+
     if not fields:
         # Simple default if no projection requested: all top-level fields
         # You can make this smarter by consulting get_security_schema internally.
@@ -232,52 +303,109 @@ def query_security_graph(
       If omitted, a default set is used.
     - limit: Max number of items to return.
     """
-    print("called query_security_graph", file=sys.stderr)
-    root_field = ENTITY_TO_ROOT_FIELD.get(entity)
-    if not root_field:
-        print("Unknown entity ",entity)
-        return json.dumps(
-            {"error": f"Unknown entity '{entity}'. See get_security_schema for valid entities."}
+    try:
+        print("called query_security_graph", file=sys.stderr)
+
+        root_field = ENTITY_TO_ROOT_FIELD.get(entity)
+        if not root_field:
+            msg = f"Unknown entity '{entity}'. See get_security_schema for valid entities."
+            print(msg, file=sys.stderr)
+            return json.dumps({"error": msg})
+
+        filters = filters or {}
+        print("filters", filters, file=sys.stderr)
+
+        # Build selection set
+        selection = build_selection_for_entity(entity, fields)
+        print("selection", selection, file=sys.stderr)
+
+        # Build filter arguments and variable definitions
+        filters_arg_str, filter_vars = build_filters_arguments(filters)
+        print("filters_arg_str", filters_arg_str, file=sys.stderr)
+        print("filter_vars", filter_vars, file=sys.stderr)
+
+        # Limit argument
+        filters_with_limit = (
+            f"{filters_arg_str}, limit: $limit" if filters_arg_str else "limit: $limit"
         )
 
-    filters = filters or {}
-    print("filters",filters, file=sys.stderr)
-    # Build selection set
-    selection = build_selection_for_entity(entity, fields)
-    print("selection",selection, file=sys.stderr)
-    # Build filter arguments and variable definitions
-    filters_arg_str, filter_vars = build_filters_arguments(filters)
-    print("filters_arg_str",filters_arg_str, file=sys.stderr)
-    print("filter_vars",filter_vars, file=sys.stderr)
-    # Limit argument
-    filters_with_limit = f"{filters_arg_str}, limit: $limit" if filters_arg_str else "limit: $limit"
+        # Build variable definitions for GraphQL
+        # For simplicity, treat all filter variables as String; you can refine types later.
+        # filter_var_defs = " ".join(
+        #     [f"${name}: String" for name in filter_vars.keys()]
+        # )
+        # if filter_var_defs:
+        #     filter_var_defs = " " + filter_var_defs
 
-    # Build variable definitions for GraphQL
-    # For simplicity, treat all filter variables as String; you can refine types later.
-    filter_var_defs = " ".join(
-        [f"${name}: String" for name in filter_vars.keys()]
-    )
-    if filter_var_defs:
-        filter_var_defs = " " + filter_var_defs
+        #openai
+        # Build variable definitions using schema filter types
 
-    gql_query = f"""
-    query QuerySecurityGraph($limit: Int{filter_var_defs}) {{
-        {root_field}({filters_with_limit}) {{
-{selection}
+        TYPE_MAP = {
+            "string": "String",
+            "boolean": "Boolean",
+            "number": "Float",
+            "datetime": "DateTime",
+        }
+
+        schema_data = get_security_schema()
+        entity_schema = schema_data["entities"][entity]
+
+        variable_defs = []
+
+        for field_name in filters.keys():
+            filter_meta = entity_schema["filters"].get(field_name)
+
+            if not filter_meta:
+                continue
+
+            schema_type = filter_meta.get("type", "string")
+
+            gql_type = TYPE_MAP.get(schema_type, "String")
+
+            var_name = field_name.replace(".", "_")
+
+            variable_defs.append(f"${var_name}: {gql_type}")
+
+        filter_var_defs = ", ".join(variable_defs)
+
+        if filter_var_defs:
+            filter_var_defs = ", " + filter_var_defs
+
+        gql_query = f"""
+        query QuerySecurityGraph($limit: Int{filter_var_defs}) {{
+            {root_field}({filters_with_limit}) {{
+            {selection}
+            }}
         }}
-    }}
-    """
-    print("gql_query",gql_query)
-    variables = {"limit": limit}
-    variables.update(filter_vars)
+        """
+        print("gql_query", gql_query, file=sys.stderr)
 
-    result = execute_gql_with_logging(gql_query, variables)
+        variables = {"limit": limit}
+        variables.update(filter_vars)
 
-    if result.errors:
-        return f"GraphQL Errors: {json.dumps([str(e) for e in result.errors])}"
+        result = execute_gql_with_logging(gql_query, variables)
 
-    # Return the collection directly
-    return json.dumps(result.data.get(root_field, []), default=str)
+        # Defensive checks on result
+        if hasattr(result, "errors") and result.errors:
+            err_list = [str(e) for e in result.errors]
+            print("GraphQL Errors:", err_list, file=sys.stderr)
+            return json.dumps({"error": "GraphQL Errors", "details": err_list})
+
+        data = getattr(result, "data", None) or {}
+        collection = data.get(root_field, [])
+        return json.dumps(collection, default=str)
+
+    except Exception as e:
+        # Catch any unexpected exceptions, log them, return structured error
+        print("query_security_graph: unexpected exception", file=sys.stderr)
+        print(type(e).__name__, str(e), file=sys.stderr)
+        return json.dumps(
+            {
+                "error": "Internal error in query_security_graph",
+                "exception": type(e).__name__,
+                "message": str(e),
+            }
+        )
 
 @mcp.tool()
 def ping(message: str) -> str:
@@ -287,8 +415,8 @@ def ping(message: str) -> str:
 if __name__ == "__main__":
     try:
         print("Starting graph MCP server...", file=sys.stderr)
-        # mcp.run(transport="streamable-http", mount_path="/mcp")
-        mcp.run(transport="stdio")
+        mcp.run(transport="streamable-http", mount_path="/mcp")
+        # mcp.run(transport="stdio")
     except Exception as e:
         print(f"Graph MCP crashed on startup: {e}", file=sys.stderr)
         raise
