@@ -196,12 +196,28 @@ class Query:
         self,
         publicly_exposed: Optional[bool] = None,
         runs_as_root: Optional[bool] = None,
-        tags: Optional[List[str]] = None,   # ← add argument here
+        environment: Optional[str] = None,
+        namespace: Optional[str] = None,
+        service_name: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        created_after: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
         limit: int = 20,
     ) -> List[ContainerAssetType]:
         with SessionLocal() as session:
             stmt = select(ContainerAsset)
+            if environment:
+                stmt = stmt.where(ContainerAsset.environment == environment)
 
+            if namespace:
+                stmt = stmt.where(ContainerAsset.namespace == namespace)
+            if created_after:
+                stmt = stmt.where(ContainerAsset.created_at >= created_after)
+
+            if created_before:
+                stmt = stmt.where(ContainerAsset.created_at <= created_before)
+            if service_name:
+                stmt = stmt.where(ContainerAsset.service_name == service_name)
             if publicly_exposed is not None:
                 stmt = stmt.where(ContainerAsset.publicly_exposed == publicly_exposed)
             if runs_as_root is not None:
