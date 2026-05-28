@@ -197,56 +197,48 @@ ENTITY_TO_ROOT_FIELD = {
 }
 
 
-def build_selection_for_entity(entity: str, fields: Optional[List[str]]) -> str:
-    # """
-    # Build a GraphQL selection set for the given entity and list of field paths.
+def build_selection_for_entity(
+    entity: str,
+    fields: Optional[List[str]],
+) -> str:
+    """
+    Build nested GraphQL selection sets from dot-path fields.
 
-    # Supports nested paths like:
-    #   - "name", "environment"
-    #   - "tags.name"
-    #   - "cves.summary"
-    #   - "cves.remediation.title"
-    # """
-
+    Supports:
+      - name
+      - cves.summary
+      - cves.remediation.title
+      - tags.name
+    """
 
     if not fields:
-        # Simple default if no projection requested: all top-level fields
-        # You can make this smarter by consulting get_security_schema internally.
         return "    id\n    name"
 
-    # Group by top-level prefix: e.g. "tags.name" -> group "tags"
-    top_level_fields: List[str] = []
-    nested_by_relation: Dict[str, List[str]] = {}
+    tree = {}
 
-    for f in fields:
-        if "." in f:
-            rel, sub = f.split(".", 1)
-            nested_by_relation.setdefault(rel, []).append(sub)
-        else:
-            top_level_fields.append(f)
+    # Build nested tree structure
+    for field in fields:
+        parts = field.split(".")
+        current = tree
 
-    # Build top-level selection lines
-    top_lines = [f"    {f}" for f in sorted(set(top_level_fields))]
+        for part in parts:
+            current = current.setdefault(part, {})
 
-    # Build nested selections
-    nested_blocks: List[str] = []
+    def render(node: Dict[str, Any], indent: int = 1) -> List[str]:
+        lines = []
+        prefix = "    " * indent
 
-    for relation, rel_fields in nested_by_relation.items():
-        # For now, include all requested subfields as-is
-        rel_lines = [f"      {sub}" for sub in sorted(set(rel_fields))]
-        block = (
-            f"    {relation} {{\n"
-            + "\n".join(rel_lines)
-            + "\n    }"
-        )
-        nested_blocks.append(block)
+        for key, child in node.items():
+            if child:
+                lines.append(f"{prefix}{key} {{")
+                lines.extend(render(child, indent + 1))
+                lines.append(f"{prefix}}}")
+            else:
+                lines.append(f"{prefix}{key}")
 
-    all_lines = top_lines + nested_blocks
-    if not all_lines:
-        # Fallback if everything was weird
-        all_lines = ["    id"]
+        return lines
 
-    return "\n".join(all_lines)
+    return "\n".join(render(tree))
 
 
 def build_filters_arguments(filters: Dict[str, Any]) -> (str, Dict[str, Any]):
@@ -264,9 +256,30 @@ def build_filters_arguments(filters: Dict[str, Any]) -> (str, Dict[str, Any]):
     variables: Dict[str, Any] = {}
 
     for key, value in filters.items():
-        # Convert dotted paths into something variable-safe, e.g. tags_name_authFilter
-        var_name = key.replace(".", "_")
-        arg_lines.append(f"{key}: ${var_name}")
+        SUPPORTED_RELATION_FILTERS = {
+            "tags.name": "tags",
+        }
+
+        if "." in key and key not in SUPPORTED_RELATION_FILTERS:
+            print(
+                f"Skipping unsupported nested filter: {key}",
+                file=sys.stderr,
+            )
+            continue
+
+        # Special handling for relation filters
+        gql_arg_name = key
+
+        if key == "tags.name":
+            gql_arg_name = "tags"
+
+            # resolver expects List[str]
+            if not isinstance(value, list):
+                value = [value]
+
+        var_name = gql_arg_name.replace(".", "_")
+
+        arg_lines.append(f"{gql_arg_name}: ${var_name}")
         variables[var_name] = value
 
     arg_str = ", ".join(arg_lines)
@@ -353,6 +366,12 @@ def query_security_graph(
         variable_defs = []
 
         for field_name in filters.keys():
+
+            # Special relation filter handling
+            if field_name == "tags.name":
+                variable_defs.append("$tags: [String!]")
+                continue
+
             filter_meta = entity_schema["filters"].get(field_name)
 
             if not filter_meta:
